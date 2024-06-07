@@ -1,0 +1,494 @@
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  AWS-Private-Marketplace-Cross-Org-Management
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Private Marketplace Configuration"
+        Parameters:
+          - ManagementExperienceId
+          - MemberOrgAccountId
+      - Label:
+          default: "General Configuration"
+        Parameters:
+          - OnlyCrossAccountAccessRole
+    ParameterLabels:
+      ManagementExperienceId:
+        default: "Management Experience ID that will be synchronized with the member organization. Check the Appendix in Readme.md file if you don't know this value."
+      MemberOrgAccountId:
+        default: Member organization's Management Account ID.
+      OnlyCrossAccountAccessRole:
+        Default: Should be yes, only if you want to add a new member organization to an existing synchronization.
+Parameters:
+  ManagementExperienceId:
+    Type: String
+    #AllowedPattern: "exp-"
+  MemberOrgAccountId:
+    Type: String
+    AllowedPattern: "[0-9]{12}"
+  OnlyCrossAccountAccessRole:
+    Type: String
+    Default: "no"
+    AllowedValues:
+      - "no"
+      - "yes"
+    Description: Should be yes, only if you want to add a new member organization to an existing synchronization.
+    ConstraintDescription: Select yes if you want to add a new member organization to an existing synchronization.
+Conditions:
+  FullDeployment: !Equals
+    - !Ref OnlyCrossAccountAccessRole
+    - "no"
+  NotFullDeployment: !Not
+    - Condition: FullDeployment
+Globals:
+  Function:
+    Runtime: python3.9
+    Timeout: 180
+    MemorySize: 128
+    Environment:
+      Variables:
+        LOG_LEVEL: "INFO"
+        SSM_PREFIX: !Ref ManagementExperienceId
+Resources:
+  DynamoDBEncryptionKey:
+    Condition: FullDeployment
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for encrypting DynamoDB tables
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id: key-policy-mp-tables
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: 
+                - !GetAtt MemberOrgAccountRole.Arn
+                - !GetAtt SyncPMPExperienceManagementRole.Arn
+            Action: 
+              - 'kms:Encrypt'
+              - 'kms:Decrypt'
+              - 'kms:ReEncrypt*'
+              - 'kms:GenerateDataKey*'
+              - 'kms:DescribeKey'
+            Resource: '*'
+  ApprovedProducts:
+    Condition: FullDeployment
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: "ID"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "ID"
+          KeyType: "HASH"
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref DynamoDBEncryptionKey
+      TableName: !Sub "${ManagementExperienceId}-ApprovedProducts"
+  RejectedProducts:
+    Condition: FullDeployment
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: "ID"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "ID"
+          KeyType: "HASH"
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref DynamoDBEncryptionKey
+      TableName: !Sub "${ManagementExperienceId}-RejectedProducts"
+  SyncTimestampsTable:
+    Condition: FullDeployment
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: "ID"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "ID"
+          KeyType: "HASH"
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      SSESpecification:
+        SSEEnabled: true
+        SSEType: KMS
+        KMSMasterKeyId: !Ref DynamoDBEncryptionKey
+      TableName: !Sub "${ManagementExperienceId}-SyncTimestamps"
+  SyncPMPExperienceManagementRole:
+    Condition: FullDeployment
+    Type: AWS::IAM::Role
+    Properties:
+      Description: "Enables the PMP lambda to run and gather the PMP information"
+      Policies:
+        - PolicyName: !Sub ${ManagementExperienceId}-SyncPMPExperienceManagementPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "dynamodb:PutItem"
+                  - "dynamodb:DeleteItem"
+                  - "dynamodb:Scan"
+                  - "dynamodb:Query"
+                  - "dynamodb:UpdateItem"
+                  - "dynamodb:PartiQLSelect"
+                  - "dynamodb:DescribeTable"
+                  - "dynamodb:GetItem"
+                  - "dynamodb:UpdateTable"
+                  - "dynamodb:GetRecords"
+                  - "dynamodb:BatchWriteItem"
+                  - "ssm:GetParameters"
+                  - "ssm:GetParameter"
+                  - "ssm:DeleteParameters"
+                  - "ssm:PutParameter"
+                  - "ssm:DeleteParameter"
+                  - "ssm:DescribeParameters"
+                  - "ssm:LabelParameterVersion"
+                  - "ssm:GetParametersByPath"
+                  - "sns:Publish"
+                Resource:
+                  - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${ManagementExperienceId}/*"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ManagementExperienceId}-ApprovedProducts"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ManagementExperienceId}-RejectedProducts"
+                  - !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ManagementExperienceId}-SyncTimestamps"
+                  - !Ref SNSUpdate
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogStream"
+                  - "logs:CreateLogGroup"
+                  - "logs:PutLogEvents"
+                  # - "logs:UpdateLogDelivery"
+                  # - "logs:ListTagsLogGroup"
+                  # - "logs:DescribeLogStreams"
+                  # - "logs:DescribeSubscriptionFilters"
+                  # - "logs:DescribeMetricFilters"
+                  # - "logs:ListLogDeliveries"
+                  # - "logs:DescribeQueryDefinitions"
+                  # - "logs:DescribeResourcePolicies"
+                  # - "logs:DescribeDestinations"
+                  # - "logs:DescribeQueries"
+                  # - "logs:DescribeLogGroups"
+                  # - "logs:CreateLogDelivery"
+                  # - "logs:PutMetricFilter"
+                  # - "logs:DescribeExportTasks"
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ManagementExperienceId}-SyncPMPManagement:*"
+              - Effect: Allow
+                Action:
+                  - "aws-marketplace:GetAgreementApprovalRequest"
+                  - "aws-marketplace:ListAgreementRequests"
+                  - "aws-marketplace:ViewSubscriptions"
+                  - "aws-marketplace:SearchAgreements"
+                  - "aws-marketplace:DescribeEntity"
+                  - "aws-marketplace:ListAgreementApprovalRequests"
+                  - "aws-marketplace:GetAgreementTerms"
+                  - "aws-marketplace:GetAgreementRequest"
+                Resource: "*"
+      RoleName: !Sub "${ManagementExperienceId}-SyncPMPExperienceManagementRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+
+  SnsAddPermissionRole:
+    Condition: FullDeployment
+    Type: AWS::IAM::Role
+    Properties:
+      Description: "Enables the SNSAddPermissionLambda to add subscription permission to the SNS sichronization trigger topic"
+      Policies:
+        - PolicyName: !Sub ${ManagementExperienceId}-SyncPMPExperienceManagementPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "sns:AddPermission"
+                  - "sns:RemovePermission"
+                  - "sns:SetTopicAttributes"
+                Resource:
+                  - !Ref SNSUpdate
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource:
+                  - !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${ManagementExperienceId}-SNSAddPermission:*"
+      RoleName: !Sub "${ManagementExperienceId}-SnsAddPermission"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+  SyncPMPManagement:
+    Condition: FullDeployment
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.lambda_handler
+      CodeUri: src/lambda/
+      Description: "This function reads the allowed and rejected products from the given PMP Experience and udpate the DynamoDB tables"
+      Role: !GetAtt SyncPMPExperienceManagementRole.Arn
+      FunctionName: !Sub "${ManagementExperienceId}-SyncPMPManagement"
+      ReservedConcurrentExecutions: 1
+
+  SNSAddPermissionLambda:
+    Condition: FullDeployment
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: add_sns_permission.handler
+      CodeUri: src/add_sns_permission/
+      Description: Custom Resource lambda to add a new account to the SNS Topic Policy
+      Role: !GetAtt SnsAddPermissionRole.Arn
+      FunctionName: !Sub "${ManagementExperienceId}-SNSAddPermission"
+      ReservedConcurrentExecutions: 1
+
+  SNSAddPermission:
+    Condition: NotFullDeployment
+    Type: Custom::CustomResource
+    Properties:
+      # ServiceToken: !GetAtt SnsAddPermissionLambda.Arn
+      ServiceToken: !Sub "{{resolve:ssm:/${ManagementExperienceId}/SNSAddPermissionLambda}}"
+      AWSAccount:
+        !Ref MemberOrgAccountId
+        #TopicArn: !Ref SNSUpdate
+      TopicArn: !Sub "{{resolve:ssm:/${ManagementExperienceId}/SNSarn}}"
+  SSMSNSAddPermissionLambda:
+    Condition: FullDeployment
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${ManagementExperienceId}/SNSAddPermissionLambda"
+      Type: String
+      Description: "Custom Resource lambda arm used for the SNSAddPermission custom cfn resource"
+      Value: !GetAtt SNSAddPermissionLambda.Arn
+  PMPExperienceID:
+    Condition: FullDeployment
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${ManagementExperienceId}/experience"
+      Type: String
+      Description: "The experience in Private Marketplace to be copied to all other organization"
+      Value: !Ref ManagementExperienceId
+  SSMRejectedTable:
+    Condition: FullDeployment
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${ManagementExperienceId}/RejectedTable"
+      Type: String
+      Description: "This is the name of the Blocked Products DynamoDB table"
+      Value: !Sub "${ManagementExperienceId}-RejectedProducts"
+  SSMApprovedTable:
+    Condition: FullDeployment
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${ManagementExperienceId}/ApprovedTable"
+      Type: String
+      Description: "This is the name of the Approved Products DynamoDB table"
+      Value: !Sub "${ManagementExperienceId}-ApprovedProducts"
+  SSMSyncTimestampsTable:
+    Condition: FullDeployment
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${ManagementExperienceId}/SyncTimestampsTable"
+      Type: String
+      Description: "This is the name of the DynamoDB table used by member orgs to update their last sync timestamp"
+      Value: !Sub "${ManagementExperienceId}-SyncTimestamps"
+  SSMAllwaysSendNotifications:
+    Condition: FullDeployment
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${ManagementExperienceId}/AllwaysSendNotification"
+      Type: String
+      Description: "This is the name of the Approved Products DynamoDB table"
+      Value: "Yes"
+  SNSUpdate:
+    Condition: FullDeployment
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "${ManagementExperienceId}-PrivateMarketplace"
+  SNSarnParameter:
+    Condition: FullDeployment
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/${ManagementExperienceId}/SNSarn"
+      Type: String
+      Description: "This is the ARN of the SNS topic to send that an update is available"
+      Value: !Ref SNSUpdate
+  LambdaFunctionSchedule:
+    Condition: FullDeployment
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Events Rule for lambda schedule
+      #ScheduleExpression: cron(0 2 * * ? *)
+      ScheduleExpression: rate(1 hour)
+      Targets:
+        - Arn: !GetAtt
+            - SyncPMPManagement
+            - Arn
+          Id: Id123
+      Name: !Sub "${ManagementExperienceId}-LambdaFunctionSchedule"
+  LambdaFunctionCwPermission:
+    Condition: FullDeployment
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt SyncPMPManagement.Arn
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt LambdaFunctionSchedule.Arn
+    Type: AWS::Lambda::Permission
+  SNSTopicPolicy:
+    Condition: FullDeployment
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Id: !Sub "${ManagementExperienceId}-SNSTopicPolicy"
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Stmt1643807474528
+            Effect: Allow
+            Principal:
+              AWS: !Ref MemberOrgAccountId
+            Action:
+              - sns:Subscribe
+            Resource: !Ref SNSUpdate
+      Topics:
+        - !Ref SNSUpdate
+  MemberOrgAccountRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: "Role used by the member organization(s) to access DynamoDB."
+      Policies:
+        - PolicyName: !Sub "${ManagementExperienceId}-MemberOrgAccountPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "dynamodb:Scan"
+                  - "dynamodb:Query"
+                Resource:
+                  - !Join [
+                      "",
+                      [
+                        "arn:aws:dynamodb:",
+                        !Ref AWS::Region,
+                        ":",
+                        !Ref AWS::AccountId,
+                        ":table/",
+                        !If [
+                          FullDeployment,
+                          !Sub "${ManagementExperienceId}-ApprovedProducts",
+                          !Sub "{{resolve:ssm:/${ManagementExperienceId}/ApprovedTable}}",
+                        ],
+                      ],
+                    ]
+                  - !Join [
+                      "",
+                      [
+                        "arn:aws:dynamodb:",
+                        !Ref AWS::Region,
+                        ":",
+                        !Ref AWS::AccountId,
+                        ":table/",
+                        !If [
+                          FullDeployment,
+                          !Sub "${ManagementExperienceId}-RejectedProducts",
+                          !Sub "{{resolve:ssm:/${ManagementExperienceId}/RejectedTable}}",
+                        ],
+                      ],
+                    ]
+        - PolicyName: !Sub "${ManagementExperienceId}-MemberOrgAccountPolicyWrite"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "dynamodb:UpdateItem"
+                Resource:
+                  - !Join [
+                      "",
+                      [
+                        "arn:aws:dynamodb:",
+                        !Ref AWS::Region,
+                        ":",
+                        !Ref AWS::AccountId,
+                        ":table/",
+                        !If [
+                          FullDeployment,
+                          !Sub "${ManagementExperienceId}-SyncTimestamps",
+                          !Sub "{{resolve:ssm:/${ManagementExperienceId}/SyncTimestampsTable}}",
+                        ],
+                      ],
+                    ]
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              "AWS":
+                !Join ["", ["arn:aws:iam::", !Ref MemberOrgAccountId, ":root"]]
+            Action:
+              - sts:AssumeRole
+Outputs:
+  SNSTopicARN:
+    Description: "Topic that will be used to trigger the sync process in member orgs"
+    Value:
+      !If [
+        FullDeployment,
+        !Ref SNSUpdate,
+        !Sub "{{resolve:ssm:/${ManagementExperienceId}/SNSarn}}",
+      ]
+  CrossAccountAccessRoleARN:
+    Description: "Role used by the member organization to access DynamoDB. (Needed to deploy the solution in the member organization)"
+    Value: !GetAtt MemberOrgAccountRole.Arn
+  ApprovedTableName:
+    Description: "Accepted products table name. (Needed to deploy the solution in the member organization)"
+    Value:
+      !If [
+        FullDeployment,
+        !Sub "${ManagementExperienceId}-ApprovedProducts",
+        !Sub "{{resolve:ssm:/${ManagementExperienceId}/ApprovedTable}}",
+      ]
+  RejectedTableName:
+    Description: "Rejected products table name. (Needed to deploy the solution in the member organization)"
+    Value:
+      !If [
+        FullDeployment,
+        !Sub "${ManagementExperienceId}-RejectedProducts",
+        !Sub "{{resolve:ssm:/${ManagementExperienceId}/RejectedTable}}",
+      ]
+  SyncTimestampsTableName:
+    Description: "SyncTimestamps table name. (Needed to deploy the solution in the member organization)"
+    Value:
+      !If [
+        FullDeployment,
+        !Sub "${ManagementExperienceId}-SyncTimestamps",
+        !Sub "{{resolve:ssm:/${ManagementExperienceId}/SyncTimestampsTable}}",
+      ]

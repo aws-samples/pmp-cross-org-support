@@ -1,0 +1,42 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Resource policy to allow organization delegated administration
+Parameters:
+  DelegatedAdministratorAccountId:
+    Type: String
+    Description: AWS Organization delegated administrator AWS Account ID
+    AllowedPattern: ^[0-9]{12}$
+Resources:
+  OrganizationDelegatedAdministration:
+    Type: AWS::Organizations::ResourcePolicy
+    Properties:
+      Content:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AllowDelegatedAdministration
+            Effect: Allow
+            Principal:
+              AWS: !Ref DelegatedAdministratorAccountId
+            Action:
+              - "organizations:DescribeOrganization"
+              - "organizations:DescribeOrganizationalUnit"
+              - "organizations:DescribeAccount"
+              - "organizations:DescribePolicy"
+              - "organizations:DescribeEffectivePolicy"
+              - "organizations:ListRoots"
+              - "organizations:ListOrganizationalUnitsForParent"
+              - "organizations:ListParents"
+              - "organizations:ListChildren"
+              - "organizations:ListAccounts"
+              - "organizations:ListAccountsForParent"
+              - "organizations:ListPolicies"
+              - "organizations:ListPoliciesForTarget"
+              - "organizations:ListTargetsForPolicy"
+              - "organizations:ListTagsForResource"
+              - "organizations:CreatePolicy"
+              - "organizations:UpdatePolicy"
+              - "organizations:DeletePolicy"
+              - "organizations:AttachPolicy"
+              - "organizations:DetachPolicy"
+              - "organizations:EnablePolicyType"
+              - "organizations:DisablePolicyType"
+            Resource: "*"

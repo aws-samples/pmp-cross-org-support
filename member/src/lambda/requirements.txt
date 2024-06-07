@@ -1,0 +1,4 @@
+# aws-requests-auth==0.4.3
+# requests==2.25.1
+# jmespath==1.0.1
+# ptvsd

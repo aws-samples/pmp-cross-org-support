@@ -1,0 +1,204 @@
+Transform: AWS::Serverless-2016-10-31
+Description: AWS-Private-Marketplace-Cross-Org-Member
+Parameters:
+  CrossAccountAccessRoleARN:
+    Type: String
+    Default: ""
+    Description: "The ARN for the role that can be assumed by this account in order to read the DynamoDB tables of approved and Blocked Products in the management organization. You will get this value from the solution deployed in the management Organization."
+  SNSTopicARN:
+    Type: String
+    Default: ""
+    Description: "The SNS topic notifying an update is available. You will get this value from the solution deployed in the management Organization."
+  ApprovedTableName:
+    MinLength: "1"
+    Type: String
+    Description: "Name of Approved Products DynamoDB table in the management organization. You will get this value from the solution deployed in the management Organization."
+  RejectedTableName:
+    MinLength: "1"
+    Type: String
+    Description: "Name of Rejected Products DynamoDB table in the management organization. You will get this value from the solution deployed in the management Organization."
+  SyncTimestampsTableName:
+    MinLength: "1"
+    Type: String
+    Description: "Name of the SyncTimestamps table in the management organization. You will get this value from the solution deployed in the management Organization."
+  MemberExperienceIds:
+    Default: ""
+    Type: String
+    Description: "Local experience Id(s) to where the experience in the management org should be synced. If left in black the all experience in the local account will be synced."
+Globals:
+  Function:
+    Runtime: python3.9
+    Environment:
+      Variables:
+        LOG_LEVEL: "INFO"
+Conditions:
+  CreateSSMMemberExperienceIds: !Not [!Equals [!Ref MemberExperienceIds, ""]]
+Resources:
+  lambdaPMProle:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: "Enables the PMP lambda to run and gather the PMP information"
+      Policies:
+        - PolicyName: LambdaPMPPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "ssm:LabelParameterVersion"
+                  - "ssm:GetParameters"
+                  - "ssm:GetParameter"
+                  - "ssm:DeleteParameters"
+                  - "ssm:PutParameter"
+                  - "ssm:DeleteParameter"
+                  - "ssm:GetParametersByPath"
+                  - "ssm:DescribeParameters"
+                  - "sqs:DeleteMessage"
+                  - "sqs:GetQueueAttributes"
+                  - "sqs:ReceiveMessage"
+                  - "sts:AssumeRole"
+                Resource:
+                  - "arn:aws:ssm:*:*:parameter/pmp/*"
+                  - !GetAtt SQSSyncNotifications.Arn
+                  - !Ref CrossAccountAccessRoleARN
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                  - "logs:ListTagsLogGroup"
+                  - "logs:DescribeLogStreams"
+                  - "logs:DescribeSubscriptionFilters"
+                  - "logs:DescribeMetricFilters"
+                  - "logs:ListLogDeliveries"
+                  - "logs:DescribeQueryDefinitions"
+                  - "logs:DescribeResourcePolicies"
+                  - "logs:DescribeDestinations"
+                  - "logs:DescribeQueries"
+                  - "logs:DescribeLogGroups"
+                  - "logs:CreateLogDelivery"
+                  - "logs:PutMetricFilter"
+                  - "logs:DescribeExportTasks"
+                  - "logs:UpdateLogDelivery"
+                Resource:
+                  - "arn:aws:logs:*:*:log-group:/aws/lambda/*:*"
+              - Effect: Allow
+                Action:
+                  - "aws-marketplace:GetAgreementApprovalRequest"
+                  - "aws-marketplace:ListAgreementRequests"
+                  - "aws-marketplace:ViewSubscriptions"
+                  - "aws-marketplace:SearchAgreements"
+                  - "aws-marketplace:DescribeEntity"
+                  - "aws-marketplace:ListAgreementApprovalRequests"
+                  - "aws-marketplace:GetAgreementTerms"
+                  - "aws-marketplace:GetAgreementRequest"
+                  - "aws-marketplace:ListEntities"
+                  - "aws-marketplace:StartChangeSet"
+                  - "aws-marketplace:DescribeChangeSet"
+                  - "organizations:DescribeOrganization"
+                Resource:
+                  - "*"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+
+  SyncPMPMember:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.lambda_handler
+      Timeout: 900
+      MemorySize: 256
+      CodeUri: src/lambda/
+      Description: "Reads the allowed and rejected products from a DynamoDB table in the management org and syncronizes it with all local member experience(s)"
+      Role: !GetAtt lambdaPMProle.Arn
+      AutoPublishAlias: live
+      ReservedConcurrentExecutions: 1
+      # ProvisionedConcurrencyConfig:
+      #   ProvisionedConcurrentExecutions: "1"
+      Events:
+        MySQSEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt SQSSyncNotifications.Arn
+            BatchSize: 1
+
+  SSMMemberExperienceIds:
+    Type: AWS::SSM::Parameter
+    Condition: CreateSSMMemberExperienceIds
+    Properties:
+      Name: /pmp/MemberExperienceIds
+      Type: String
+      Description: "The experience ids that will be synced with the products from the management org."
+      Value: !Ref MemberExperienceIds
+
+  SSMCrossAccountAccessRoleARN:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /pmp/CrossAccountAccessRoleARN
+      Type: String
+      Description: "This is the Role that allows us to read the DynamoDB tables in the management Org"
+      Value: !Ref CrossAccountAccessRoleARN
+
+  SSMRejectedTable:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /pmp/RejectedTable
+      Type: String
+      Description: "This is the name of the Rejected Products DynamoDB table in the management Org"
+      Value: !Ref RejectedTableName
+
+  SSMApprovedTable:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /pmp/ApprovedTable
+      Type: String
+      Description: "This is the name of the Approved Products DynamoDB table in the management Org"
+      Value: !Ref ApprovedTableName
+
+  SSMSyncTimestampsTableName:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /pmp/SyncTimestampsTableName
+      Type: String
+      Description: "This is the name of the Approved Products DynamoDB table in the management Org"
+      Value: !Ref SyncTimestampsTableName
+
+  SQSSyncNotifications:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 3070
+      VisibilityTimeout: 1020
+      #KmsMasterKeyId: alias/aws/sqs
+
+  SQSSyncNotificationsPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Id: SQSSyncNotificationsPolicy
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Sid-SQSSyncNotificationsPolicy
+            Effect: Allow
+            Principal:
+              Service: "sns.amazonaws.com"
+            Action: SQS:SendMessage
+            Resource: !GetAtt SQSSyncNotifications.Arn
+            Condition:
+              ArnLike:
+                aws:SourceArn: !Ref SNSTopicARN
+      Queues:
+        - !Ref SQSSyncNotifications
+
+  SnsSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: sqs
+      Endpoint: !GetAtt SQSSyncNotifications.Arn
+      Region: !Ref "AWS::Region"
+      TopicArn: !Ref SNSTopicARN
